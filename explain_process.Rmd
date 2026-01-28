@@ -1,0 +1,138 @@
+---
+title: "Nikkei Asia スクレイピングプロセスの解説"
+author: "Code Explanation Bot"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# 概要
+
+このドキュメントでは、`scrape_nikkei.R` スクリプトがどのように動作し、Nikkei Asia (https://asia.nikkei.com/) からニュース記事を取得しているかを解説します。
+
+このスクリプトは、HTMLを直接解析するのではなく、ページ内に埋め込まれたJSONデータ (`__NEXT_DATA__`) を利用することで、より堅牢なデータ取得を実現しています。
+
+# 1. ライブラリの読み込み
+
+まず、必要なRパッケージを読み込みます。
+
+*   `rvest`: ウェブページの取得とHTML解析に使用します。
+*   `jsonlite`: JSON形式のデータをRのオブジェクトに変換するために使用します。
+*   `dplyr`: データの整形（フィルタリング、選択など）に使用します。
+
+```{r setup, message=FALSE}
+library(rvest)
+library(jsonlite)
+library(dplyr)
+```
+
+# 2. ニュース抽出関数 `extract_news` の定義
+
+スクレイピングの主要なロジックは `extract_news` 関数に集約されています。この関数の動作を順を追って見ていきます。
+
+## 2.1 ウェブページの取得
+
+`rvest::read_html` を使用して、Nikkei Asiaのトップページを取得します。ネットワークエラーが発生した場合に備えて `tryCatch` でエラーハンドリングを行っています。
+
+```{r fetch_page, eval=FALSE}
+url <- "https://asia.nikkei.com/"
+
+# ウェブページの取得
+webpage <- tryCatch(read_html(url), error = function(e) {
+  message("Failed to fetch URL: ", e$message)
+  return(NULL)
+})
+```
+
+## 2.2 データの解析 (JSON抽出)
+
+最近の多くのウェブサイト（Next.js製など）では、ページコンテンツがHTMLタグの中ではなく、`<script id="__NEXT_DATA__">` タグ内のJSONデータとして埋め込まれていることがあります。このスクリプトはこのJSONデータをターゲットにします。これにより、HTMLのクラス名変更などの影響を受けにくくなります。
+
+```{r parse_json, eval=FALSE}
+# __NEXT_DATA__ スクリプトタグを探す
+script_node <- webpage %>% html_node("#__NEXT_DATA__")
+
+# JSONテキストをRのリスト構造に変換
+json_content <- html_text(script_node)
+data <- tryCatch(fromJSON(json_content), error = function(e) {
+  message("Failed to parse JSON: ", e$message)
+  return(NULL)
+})
+```
+
+## 2.3 記事情報の抽出
+
+JSONデータ内の `props$pageProps` にページ全体の情報が含まれています。ここから以下の優先順位で記事を探します。
+
+1.  **Homepage Latest Headlines**: 最も重要なトップニュース。
+2.  **Content Blocks**: ページ内の各セクション（Opinion, Politicsなど）にある記事。
+3.  **Most Read**: よく読まれている記事（バックアップとして使用）。
+
+```{r extract_items, eval=FALSE}
+props <- data$props$pageProps
+all_articles <- list()
+
+# 1. ホームページの最新ヘッドライン (最優先)
+if (!is.null(props$homepageLatestHeadlines$items)) {
+  df <- props$homepageLatestHeadlines$items
+  # 必要なカラムがあるか確認して抽出
+  if ("name" %in% names(df) && "path" %in% names(df)) {
+    all_articles[[length(all_articles) + 1]] <- df %>% select(title = name, path)
+  }
+}
+
+# 2. コンテンツブロックからの抽出
+# ページは複数のブロックで構成されており、ループ処理で記事を探します
+if (!is.null(props$data$blocks)) {
+  blocks <- props$data$blocks
+  # (簡略化のため詳細なループ処理は省略しますが、各ブロック内のitemsやheadlineを確認しています)
+  # ...
+}
+```
+
+## 2.4 データの整形と結合
+
+取得した複数の記事リストを結合し、以下のクリーニングを行います。
+
+1.  **無効なデータの削除**: タイトルやパスがないものを除外。
+2.  **URLの正規化**: 相対パス (`/article/...`) を絶対パス (`https://asia.nikkei.com/article/...`) に変換。
+3.  **重複の削除**: 同じ記事が複数のセクションに含まれる場合があるため、URLで重複を削除。
+4.  **トップ10の抽出**: 最終的に上位10件のみを返します。
+
+```{r process_data, eval=FALSE}
+combined <- bind_rows(all_articles)
+
+# URLの正規化ロジック
+combined$link <- sapply(combined$path, function(p) {
+  if (grepl("^http", p)) {
+    return(p)
+  } else {
+    return(paste0("https://asia.nikkei.com", p))
+  }
+})
+
+# 重複削除して上位10件を取得
+result <- combined %>%
+  distinct(link, .keep_all = TRUE) %>%
+  select(title, link) %>%
+  head(10)
+```
+
+# 3. 実行と保存
+
+最後に、定義した関数を実行し、結果をCSVファイルとして保存します。
+
+```{r execute, eval=FALSE}
+# 関数の実行
+news_list <- extract_news()
+
+# 結果の確認と保存
+if (!is.null(news_list)) {
+  print(news_list)
+  write.csv(news_list, "nikkei_news_top10.csv", row.names = FALSE)
+  message("Successfully scraped top 10 news articles.")
+} else {
+  message("No news found.")
+}
+```
+
+これで、`nikkei_news_top10.csv` というファイルに最新ニュースが保存されます。
