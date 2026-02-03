@@ -3,3 +3,8 @@
 .RData
 .Ruserdata
 nikkei_news_top10.csv
+nikkei_full_report.pdf
+nikkei_full_report.md
+.env
+auth.json
+__pycache__/
