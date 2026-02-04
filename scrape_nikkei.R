@@ -46,7 +46,13 @@ extract_news <- function() {
   if (!is.null(props$homepageLatestHeadlines$items)) {
     df <- props$homepageLatestHeadlines$items
     if ("name" %in% names(df) && "path" %in% names(df)) {
-      all_articles[[length(all_articles) + 1]] <- df %>% select(title = name, path)
+      # Try to find displayDate
+      if ("displayDate" %in% names(df)) {
+        df <- df %>% select(title = name, path, displayDate)
+      } else {
+        df <- df %>% select(title = name, path) %>% mutate(displayDate = NA)
+      }
+      all_articles[[length(all_articles) + 1]] <- df
     }
   }
 
@@ -59,30 +65,39 @@ extract_news <- function() {
           items <- blocks$items[[i]]
           if (!is.null(items) && is.data.frame(items)) {
             if ("name" %in% names(items) && "path" %in% names(items)) {
-              df <- items %>% select(title = name, path)
+              if ("displayDate" %in% names(items)) {
+                 df <- items %>% select(title = name, path, displayDate)
+              } else {
+                 df <- items %>% select(title = name, path) %>% mutate(displayDate = NA)
+              }
               all_articles[[length(all_articles) + 1]] <- df
             } else if ("headline" %in% names(items) && "url" %in% names(items)) {
-              df <- items %>% select(title = headline, path = url)
+               if ("displayDate" %in% names(items)) {
+                  df <- items %>% select(title = headline, path = url, displayDate)
+               } else {
+                  df <- items %>% select(title = headline, path = url) %>% mutate(displayDate = NA)
+               }
               all_articles[[length(all_articles) + 1]] <- df
             }
           }
         }
+        # Fallback for old block structure if necessary (less likely to have date)
         if ("headline" %in% names(blocks) && "headline_url" %in% names(blocks)) {
           title <- blocks$headline[i]
           path <- blocks$headline_url[i]
           if (!is.na(title) && !is.na(path) && title != "") {
-            all_articles[[length(all_articles) + 1]] <- data.frame(title = title, path = path, stringsAsFactors = FALSE)
+            all_articles[[length(all_articles) + 1]] <- data.frame(title = title, path = path, displayDate = NA, stringsAsFactors = FALSE)
           }
         }
       }
     }
   }
 
-  # 3. Most Read
+  # 3. Most Read (Usually no date, but we keep it for Top 10)
   if (!is.null(props$mostReadArticles)) {
     df <- props$mostReadArticles
     if ("title" %in% names(df) && "path" %in% names(df)) {
-      all_articles[[length(all_articles) + 1]] <- df %>% select(title, path)
+      all_articles[[length(all_articles) + 1]] <- df %>% select(title, path) %>% mutate(displayDate = NA)
     }
   }
 
@@ -94,8 +109,20 @@ extract_news <- function() {
       else if (grepl("^/", p)) return(paste0("https://asia.nikkei.com", p))
       else return(paste0("https://asia.nikkei.com/", p))
     })
-    combined <- combined %>% distinct(link, .keep_all = TRUE) %>% select(title, link)
-    return(head(combined, 10))
+
+    # Process Date
+    combined$date_obj <- as.Date(NA)
+    if ("displayDate" %in% names(combined)) {
+       # displayDate is Unix timestamp (seconds) or string?
+       # Inspection showed numeric 177... which is seconds.
+       # Some might be NA
+
+       # Safely convert
+       combined$date_obj <- as.Date(as.POSIXct(as.numeric(combined$displayDate), origin="1970-01-01"))
+    }
+
+    combined <- combined %>% distinct(link, .keep_all = TRUE)
+    return(combined) # Return all unique articles
   }
   return(NULL)
 }
@@ -157,55 +184,35 @@ get_article_content <- function(url, cookie_string) {
   return(full_text)
 }
 
-# Main Execution Flow
-main <- function() {
-  # 1. Get Headlines
-  news_list <- extract_news()
+# Helper function to generate report
+generate_report <- function(news_list, report_title, base_filename, cookie) {
+    if (nrow(news_list) == 0) {
+        message("No articles for ", base_filename)
+        return()
+    }
 
-  if (is.null(news_list)) {
-    message("No news found.")
-    return()
-  }
-
-  # Always save the CSV first (as per original functionality)
-  write.csv(news_list, "nikkei_news_top10.csv", row.names = FALSE)
-  message("Saved headlines to nikkei_news_top10.csv")
-
-  # 2. Check for Cookie for Full Text
-  cookie <- Sys.getenv("NIKKEI_COOKIE")
-
-  if (cookie == "") {
-    message("NOTE: NIKKEI_COOKIE environment variable is not set.")
-    message("Skipping full text extraction. Only headlines are saved.")
-    message("To get full text, set NIKKEI_COOKIE with your session cookie.")
-  } else {
-    message("NIKKEI_COOKIE found. Starting full text extraction...")
-
-    # Prepare data for report
+    # Fetch full text
     full_articles <- list()
-
     for (i in 1:nrow(news_list)) {
       title <- news_list$title[i]
       link <- news_list$link[i]
-
       text <- get_article_content(link, cookie)
-
       full_articles[[i]] <- list(title = title, link = link, text = text)
     }
 
     # Generate RMarkdown file
-    rmd_file <- "nikkei_full_report.Rmd"
-    pdf_file <- "nikkei_full_report.pdf"
+    rmd_file <- paste0(base_filename, ".Rmd")
+    pdf_file <- paste0(base_filename, ".pdf")
 
     # Create RMarkdown content
     rmd_content <- c(
       "---",
-      "title: \"Nikkei Asia Full News Report\"",
+      paste0("title: \"", report_title, "\""),
       paste0("date: \"", Sys.Date(), "\""),
       "output: pdf_document",
       "---",
       "",
-      "# Top 10 Articles",
+      "# Articles",
       ""
     )
 
@@ -225,21 +232,65 @@ main <- function() {
     message("Created RMarkdown report: ", rmd_file)
 
     # Render to PDF
-    message("Rendering PDF...")
+    message("Rendering PDF for ", base_filename, "...")
     tryCatch({
       render(rmd_file, output_file = pdf_file, quiet = TRUE)
       message("Successfully generated PDF report: ", pdf_file)
     }, error = function(e) {
       message("Failed to generate PDF: ", e$message)
-      message("This might be due to missing 'pandoc' or LaTeX engine.")
-      message("You can still use the generated .Rmd file or converting it to another format.")
-
       # Fallback: Save as Markdown
-      md_file <- "nikkei_full_report.md"
-      # Just rename or use the Rmd content as MD (strip YAML header if needed, but Rmd is MD compatible)
+      md_file <- paste0(base_filename, ".md")
       writeLines(rmd_content, md_file)
       message("Saved as Markdown instead: ", md_file)
     })
+}
+
+# Main Execution Flow
+main <- function() {
+  # 1. Get Headlines
+  all_news <- extract_news()
+
+  if (is.null(all_news) || nrow(all_news) == 0) {
+    message("No news found.")
+    return()
+  }
+
+  # --- Task 1: Top 10 ---
+  top10_news <- head(all_news, 10)
+  write.csv(top10_news, "nikkei_news_top10.csv", row.names = FALSE)
+  message("Saved headlines to nikkei_news_top10.csv")
+
+  # --- Task 2: Yesterday's News ---
+  yesterday <- Sys.Date() - 1
+  yesterday_news <- all_news %>% filter(date_obj == yesterday)
+
+  yesterday_str <- format(yesterday, "%Y-%m-%d")
+  yesterday_filename <- paste0("nikkei_news_", yesterday_str)
+
+  if (nrow(yesterday_news) > 0) {
+      write.csv(yesterday_news, paste0(yesterday_filename, ".csv"), row.names = FALSE)
+      message("Saved yesterday's headlines to ", yesterday_filename, ".csv")
+  } else {
+      message("No news found for yesterday (", yesterday_str, ")")
+  }
+
+  # --- Full Text Extraction ---
+  cookie <- Sys.getenv("NIKKEI_COOKIE")
+
+  if (cookie == "") {
+    message("NOTE: NIKKEI_COOKIE environment variable is not set.")
+    message("Skipping full text extraction. Only headlines are saved.")
+    message("To get full text, set NIKKEI_COOKIE with your session cookie.")
+  } else {
+    message("NIKKEI_COOKIE found. Starting full text extraction...")
+
+    # Report 1: Top 10
+    generate_report(top10_news, "Nikkei Asia Top 10 News", "nikkei_full_report", cookie)
+
+    # Report 2: Yesterday
+    if (nrow(yesterday_news) > 0) {
+        generate_report(yesterday_news, paste0("Nikkei Asia News - ", yesterday_str), yesterday_filename, cookie)
+    }
   }
 }
 

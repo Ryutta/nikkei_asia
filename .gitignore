@@ -8,3 +8,6 @@ nikkei_full_report.md
 .env
 auth.json
 __pycache__/
+nikkei_news_*.csv
+nikkei_news_*.pdf
+nikkei_news_*.md
