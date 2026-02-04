@@ -1,16 +1,18 @@
 # Load necessary libraries
-# To install: install.packages(c("rvest", "jsonlite", "dplyr", "httr", "rmarkdown"))
+# To install: install.packages(c("rvest", "jsonlite", "dplyr", "httr", "rmarkdown", "lubridate"))
 if (!require("rvest")) install.packages("rvest")
 if (!require("jsonlite")) install.packages("jsonlite")
 if (!require("dplyr")) install.packages("dplyr")
 if (!require("httr")) install.packages("httr")
 if (!require("rmarkdown")) install.packages("rmarkdown")
+if (!require("lubridate")) install.packages("lubridate")
 
 library(rvest)
 library(jsonlite)
 library(dplyr)
 library(httr)
 library(rmarkdown)
+library(lubridate)
 
 # Function to extract news from Nikkei Asia (Headlines)
 extract_news <- function() {
@@ -42,11 +44,39 @@ extract_news <- function() {
   props <- data$props$pageProps
   all_articles <- list()
 
+  # Helper to safely extract date
+  # We look for common date fields
+  extract_date <- function(item) {
+    possible_fields <- c("date", "published", "publishedAt", "displayDate", "updated", "publishedDate", "updatedAt")
+    for (f in possible_fields) {
+      if (f %in% names(item)) {
+        return(item[[f]])
+      }
+    }
+    return(NA)
+  }
+
   # 1. Homepage Latest Headlines
   if (!is.null(props$homepageLatestHeadlines$items)) {
     df <- props$homepageLatestHeadlines$items
     if ("name" %in% names(df) && "path" %in% names(df)) {
-      all_articles[[length(all_articles) + 1]] <- df %>% select(title = name, path)
+      # Try to find a date column in the dataframe
+      date_col <- NA
+      possible_fields <- c("date", "published", "publishedAt", "displayDate", "updated", "publishedDate", "updatedAt")
+      for (f in possible_fields) {
+        if (f %in% names(df)) {
+          date_col <- f
+          break
+        }
+      }
+
+      temp_df <- df %>% select(title = name, path)
+      if (!is.na(date_col)) {
+        temp_df$date_raw <- df[[date_col]]
+      } else {
+        temp_df$date_raw <- NA
+      }
+      all_articles[[length(all_articles) + 1]] <- temp_df
     }
   }
 
@@ -58,20 +88,44 @@ extract_news <- function() {
         if ("items" %in% names(blocks) && !is.null(blocks$items)) {
           items <- blocks$items[[i]]
           if (!is.null(items) && is.data.frame(items)) {
+            temp_df <- NULL
+            date_val <- NA
+
+            # Identify Date Column
+            possible_fields <- c("date", "published", "publishedAt", "displayDate", "updated", "publishedDate", "updatedAt")
+            for (f in possible_fields) {
+              if (f %in% names(items)) {
+                date_val <- items[[f]]
+                break
+              }
+            }
+
             if ("name" %in% names(items) && "path" %in% names(items)) {
-              df <- items %>% select(title = name, path)
-              all_articles[[length(all_articles) + 1]] <- df
+              temp_df <- items %>% select(title = name, path)
             } else if ("headline" %in% names(items) && "url" %in% names(items)) {
-              df <- items %>% select(title = headline, path = url)
-              all_articles[[length(all_articles) + 1]] <- df
+              temp_df <- items %>% select(title = headline, path = url)
+            }
+
+            if (!is.null(temp_df)) {
+              if (!is.null(date_val) && length(date_val) == nrow(temp_df)) {
+                temp_df$date_raw <- date_val
+              } else {
+                temp_df$date_raw <- NA
+              }
+              all_articles[[length(all_articles) + 1]] <- temp_df
             }
           }
         }
+
+        # Handling single headline blocks
         if ("headline" %in% names(blocks) && "headline_url" %in% names(blocks)) {
           title <- blocks$headline[i]
           path <- blocks$headline_url[i]
+          # Try to find date in block level? Less likely, but let's check
+          date_raw <- NA # Default
+
           if (!is.na(title) && !is.na(path) && title != "") {
-            all_articles[[length(all_articles) + 1]] <- data.frame(title = title, path = path, stringsAsFactors = FALSE)
+            all_articles[[length(all_articles) + 1]] <- data.frame(title = title, path = path, date_raw = date_raw, stringsAsFactors = FALSE)
           }
         }
       }
@@ -82,20 +136,50 @@ extract_news <- function() {
   if (!is.null(props$mostReadArticles)) {
     df <- props$mostReadArticles
     if ("title" %in% names(df) && "path" %in% names(df)) {
-      all_articles[[length(all_articles) + 1]] <- df %>% select(title, path)
+       # Most Read usually doesn't show date on home, but let's check
+      date_col <- NA
+      possible_fields <- c("date", "published", "publishedAt", "displayDate", "updated", "publishedDate")
+      for (f in possible_fields) {
+        if (f %in% names(df)) {
+          date_col <- f
+          break
+        }
+      }
+
+      temp_df <- df %>% select(title, path)
+      if (!is.na(date_col)) {
+        temp_df$date_raw <- df[[date_col]]
+      } else {
+        temp_df$date_raw <- NA
+      }
+      all_articles[[length(all_articles) + 1]] <- temp_df
     }
   }
 
   if (length(all_articles) > 0) {
     combined <- bind_rows(all_articles)
     combined <- combined %>% filter(!is.na(title) & !is.na(path) & title != "")
+
+    # Normalize Link
     combined$link <- sapply(combined$path, function(p) {
       if (grepl("^http", p)) return(p)
       else if (grepl("^/", p)) return(paste0("https://asia.nikkei.com", p))
       else return(paste0("https://asia.nikkei.com/", p))
     })
-    combined <- combined %>% distinct(link, .keep_all = TRUE) %>% select(title, link)
-    return(head(combined, 10))
+
+    combined <- combined %>% distinct(link, .keep_all = TRUE) %>% select(title, link, date_raw)
+
+    # Attempt to parse date
+    # Format usually ISO or "October 26, 2023"
+    # We use lubridate's parse_date_time which is very flexible
+    combined$date <- NA
+    if (!all(is.na(combined$date_raw))) {
+      # Try parsing
+      parsed_dates <- parse_date_time(combined$date_raw, orders = c("ymd", "ymd HMS", "mdy", "mdy HMS", "dmy", "dmy HMS", "ISO8601"))
+      combined$date <- as.Date(parsed_dates)
+    }
+
+    return(combined)
   }
   return(NULL)
 }
@@ -123,30 +207,19 @@ get_article_content <- function(url, cookie_string) {
   page <- read_html(page_content)
 
   # Attempt to extract article body
-  # Strategy 1: Look for common article body classes
-  # .c-article-body is common in Nikkei Asia
   body_node <- page %>% html_node(".c-article-body, [class*='article-body'], [class*='ArticleBody']")
 
   full_text <- ""
   if (length(body_node) > 0) {
-    # Extract text from paragraphs to preserve some structure
     paragraphs <- body_node %>% html_nodes("p") %>% html_text()
     full_text <- paste(paragraphs, collapse = "\n\n")
   }
 
-  # Strategy 2: Fallback to __NEXT_DATA__ if HTML extraction failed or returned empty
   if (nchar(full_text) < 100) {
-    script_node <- page %>% html_node("#__NEXT_DATA__")
-    if (length(script_node) > 0) {
-      tryCatch({
-        json_data <- fromJSON(html_text(script_node))
-        # Navigate to content - this path is a guess based on common props structure, needs verification
-        # Usually props -> pageProps -> currentArticle -> content -> body
-        # Or props -> pageProps -> article -> content
-        # We will try a recursive search or just dump specific fields if found
-        # For now, let's keep it simple. If HTML fails, we might be out of luck without specific JSON path.
-        message("HTML body extraction failed/empty. JSON fallback not fully implemented.")
-      }, error = function(e) {})
+    # Fallback to metadata description if body is empty
+    meta_desc <- page %>% html_node("meta[name='description']") %>% html_attr("content")
+    if (!is.na(meta_desc)) {
+        full_text <- paste("[Body extraction failed. Description]:", meta_desc)
     }
   }
 
@@ -157,55 +230,40 @@ get_article_content <- function(url, cookie_string) {
   return(full_text)
 }
 
-# Main Execution Flow
-main <- function() {
-  # 1. Get Headlines
-  news_list <- extract_news()
-
-  if (is.null(news_list)) {
-    message("No news found.")
-    return()
-  }
-
-  # Always save the CSV first (as per original functionality)
-  write.csv(news_list, "nikkei_news_top10.csv", row.names = FALSE)
-  message("Saved headlines to nikkei_news_top10.csv")
-
-  # 2. Check for Cookie for Full Text
-  cookie <- Sys.getenv("NIKKEI_COOKIE")
-
-  if (cookie == "") {
-    message("NOTE: NIKKEI_COOKIE environment variable is not set.")
-    message("Skipping full text extraction. Only headlines are saved.")
-    message("To get full text, set NIKKEI_COOKIE with your session cookie.")
-  } else {
-    message("NIKKEI_COOKIE found. Starting full text extraction...")
-
-    # Prepare data for report
+# Function to generate RMarkdown and PDF report
+generate_report <- function(articles_list, title_text, filename_base, cookie) {
     full_articles <- list()
 
-    for (i in 1:nrow(news_list)) {
-      title <- news_list$title[i]
-      link <- news_list$link[i]
+    # Fetch content
+    if (cookie != "") {
+        for (i in 1:nrow(articles_list)) {
+          title <- articles_list$title[i]
+          link <- articles_list$link[i]
 
-      text <- get_article_content(link, cookie)
+          text <- get_article_content(link, cookie)
 
-      full_articles[[i]] <- list(title = title, link = link, text = text)
+          full_articles[[i]] <- list(title = title, link = link, text = text)
+        }
+    } else {
+        # If no cookie, just list titles and links
+         for (i in 1:nrow(articles_list)) {
+          full_articles[[i]] <- list(title = articles_list$title[i], link = articles_list$link[i], text = "[Full text requires cookie]")
+        }
     }
 
     # Generate RMarkdown file
-    rmd_file <- "nikkei_full_report.Rmd"
-    pdf_file <- "nikkei_full_report.pdf"
+    rmd_file <- paste0(filename_base, ".Rmd")
+    pdf_file <- paste0(filename_base, ".pdf")
 
     # Create RMarkdown content
     rmd_content <- c(
       "---",
-      "title: \"Nikkei Asia Full News Report\"",
+      paste0("title: \"", title_text, "\""),
       paste0("date: \"", Sys.Date(), "\""),
       "output: pdf_document",
       "---",
       "",
-      "# Top 10 Articles",
+      paste0("# ", title_text),
       ""
     )
 
@@ -231,15 +289,74 @@ main <- function() {
       message("Successfully generated PDF report: ", pdf_file)
     }, error = function(e) {
       message("Failed to generate PDF: ", e$message)
-      message("This might be due to missing 'pandoc' or LaTeX engine.")
-      message("You can still use the generated .Rmd file or converting it to another format.")
-
       # Fallback: Save as Markdown
-      md_file <- "nikkei_full_report.md"
-      # Just rename or use the Rmd content as MD (strip YAML header if needed, but Rmd is MD compatible)
+      md_file <- paste0(filename_base, ".md")
       writeLines(rmd_content, md_file)
       message("Saved as Markdown instead: ", md_file)
     })
+}
+
+
+# Main Execution Flow
+main <- function() {
+  # 1. Get All Headlines
+  all_news <- extract_news()
+
+  if (is.null(all_news) || nrow(all_news) == 0) {
+    message("No news found.")
+    return()
+  }
+
+  message("Found ", nrow(all_news), " articles in total.")
+
+  # --- Part 1: Top 10 Headlines (Legacy Behavior) ---
+  message("\n--- Processing Top 10 Headlines ---")
+  top10_list <- head(all_news, 10)
+
+  # Save CSV
+  write.csv(top10_list %>% select(title, link), "nikkei_news_top10.csv", row.names = FALSE)
+  message("Saved headlines to nikkei_news_top10.csv")
+
+  # Check Cookie
+  cookie <- Sys.getenv("NIKKEI_COOKIE")
+  if (cookie == "") {
+    message("NOTE: NIKKEI_COOKIE environment variable is not set. Full text will not be available.")
+  }
+
+  # Generate PDF for Top 10
+  generate_report(top10_list, "Nikkei Asia Top 10 News", "nikkei_full_report", cookie)
+
+
+  # --- Part 2: Yesterday's Articles (New Feature) ---
+  message("\n--- Processing Yesterday's Articles ---")
+
+  yesterday <- Sys.Date() - 1
+  message("Looking for articles dated: ", yesterday)
+
+  # Filter for yesterday
+  # We handle NAs by excluding them from this specific filter
+  yesterday_news <- all_news %>% filter(!is.na(date) & date == yesterday)
+
+  if (nrow(yesterday_news) > 0) {
+      message("Found ", nrow(yesterday_news), " articles from yesterday.")
+
+      # Filename with date
+      filename_base <- paste0("nikkei_news_", yesterday)
+      csv_filename <- paste0(filename_base, ".csv")
+
+      # Save CSV
+      write.csv(yesterday_news %>% select(title, link, date), csv_filename, row.names = FALSE)
+      message("Saved yesterday's news to ", csv_filename)
+
+      # Generate PDF
+      generate_report(yesterday_news, paste0("Nikkei Asia News - ", yesterday), filename_base, cookie)
+
+  } else {
+      message("No articles found specifically dated ", yesterday, " in the scraped feed.")
+      message("Note: The scraped feed is limited to the homepage/latest JSON. Older articles might require pagination (not implemented).")
+
+      # Debug: Print dates found
+      message("Dates found in feed: ", paste(unique(na.omit(all_news$date)), collapse=", "))
   }
 }
 
