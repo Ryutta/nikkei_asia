@@ -2,4 +2,14 @@
 .Rhistory
 .RData
 .Ruserdata
-nikkei_news_top10.csv
+nikkei_news_*.csv
+nikkei_news_*.pdf
+nikkei_news_*.md
+search_results.csv
+Rlibs/
+cookie.txt
+output.txt
+install.log
+install_deps.R
+.Rprofile
+.Renviron
