@@ -1,10 +1,10 @@
 # Load necessary libraries
-if (!require("rvest")) install.packages("rvest")
-if (!require("jsonlite")) install.packages("jsonlite")
-if (!require("dplyr")) install.packages("dplyr")
-if (!require("httr")) install.packages("httr")
-if (!require("rmarkdown")) install.packages("rmarkdown")
-if (!require("lubridate")) install.packages("lubridate")
+if (!require("rvest")) install.packages("rvest", repos = "https://cloud.r-project.org")
+if (!require("jsonlite")) install.packages("jsonlite", repos = "https://cloud.r-project.org")
+if (!require("dplyr")) install.packages("dplyr", repos = "https://cloud.r-project.org")
+if (!require("httr")) install.packages("httr", repos = "https://cloud.r-project.org")
+if (!require("rmarkdown")) install.packages("rmarkdown", repos = "https://cloud.r-project.org")
+if (!require("lubridate")) install.packages("lubridate", repos = "https://cloud.r-project.org")
 
 library(rvest)
 library(jsonlite)
@@ -52,7 +52,7 @@ get_article_content <- function(url, cookie_string) {
   return(full_text)
 }
 
-# Function to fetch news for a specific date
+# Function to fetch news for a specific date using latestheadlines URL
 scrape_news_by_date <- function(target_date_str) {
   target_date <- tryCatch(ymd(target_date_str), error = function(e) NULL)
 
@@ -61,65 +61,87 @@ scrape_news_by_date <- function(target_date_str) {
     return(NULL)
   }
 
-  message("Searching for news on: ", target_date)
+  formatted_date <- format(target_date, "%Y-%m-%d")
+  url <- paste0("https://asia.nikkei.com/latestheadlines?date=", formatted_date)
 
+  message("Fetching headlines for: ", formatted_date, " from ", url)
+
+  # Use User-Agent to avoid rejection
+  ua <- "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+
+  session <- tryCatch(
+    session(url, user_agent(ua)),
+    error = function(e) {
+      message("Failed to create session: ", e$message)
+      return(NULL)
+    }
+  )
+
+  if (is.null(session)) return(NULL)
+
+  webpage <- read_html(session)
+
+  script_node <- webpage %>% html_node("#__NEXT_DATA__")
+  if (length(script_node) == 0) {
+    message("Could not find data script tag.")
+    return(NULL)
+  }
+
+  json_content <- html_text(script_node)
+  data <- tryCatch(fromJSON(json_content), error = function(e) {
+    message("Failed to parse JSON: ", e$message)
+    return(NULL)
+  })
+
+  if (is.null(data)) return(NULL)
+
+  # Navigate to latestHeadlinesData items
+  # Structure seems to be data$props$pageProps$latestHeadlinesData$items
+  items <- data$props$pageProps$latestHeadlinesData$items
+
+  if (is.null(items) || length(items) == 0) {
+    # Fallback: check other locations or try the old search method?
+    # For now, just report empty.
+    message("No items found in latestHeadlinesData for date ", formatted_date)
+    return(NULL)
+  }
+
+  # Process items
   all_articles <- list()
-  page_num <- 1
-  stop_search <- FALSE
-  max_pages <- 50 # Safety limit
 
-  while (!stop_search && page_num <= max_pages) {
-    # We use 'query=news' as a generic search term because empty queries return no results.
-    # We explicitly sort by 'newest' to ensure we can stop when we hit older dates.
-    url <- paste0("https://asia.nikkei.com/search?query=news&sortBy=newest&page=", page_num)
-    message("Fetching page: ", page_num)
+  # Ensure items is a data frame
+  if (!is.data.frame(items)) {
+     if (is.list(items)) {
+         # Attempt to bind if it's a list of lists
+         items <- tryCatch(bind_rows(items), error = function(e) NULL)
+     }
+  }
 
-    webpage <- tryCatch(read_html(url), error = function(e) {
-      message("Failed to fetch URL: ", e$message)
+  if (is.null(items) || nrow(items) == 0) {
+      message("Items structure unexpected.")
       return(NULL)
-    })
+  }
 
-    if (is.null(webpage)) break
+  for (i in 1:nrow(items)) {
+    title <- items$name[i]
+    path <- items$path[i]
+    timestamp <- items$displayDate[i] # Unix timestamp
 
-    script_node <- webpage %>% html_node("#__NEXT_DATA__")
-    if (length(script_node) == 0) {
-      message("Could not find data script tag.")
-      break
-    }
+    # Convert timestamp to Date
+    # Nikkei usually uses JST/Asia time, but timestamps are UTC.
+    # We should probably convert to Date in the local context or just check if it falls on the day.
+    # The URL `date=YYYY-MM-DD` likely filters by JST day.
+    # Let's trust the server returned relevant items for that "date" query parameter.
 
-    json_content <- html_text(script_node)
-    data <- tryCatch(fromJSON(json_content), error = function(e) {
-      message("Failed to parse JSON: ", e$message)
-      return(NULL)
-    })
+    item_date_obj <- as.POSIXct(timestamp, origin="1970-01-01", tz="Asia/Tokyo")
+    item_date <- as.Date(item_date_obj)
 
-    if (is.null(data)) break
+    # Note: Sometimes an article from previous day late night might appear?
+    # Or next day early morning?
+    # We will include everything returned by this page as "relevant for this date view".
+    # But usually user wants exactly that date.
 
-    props <- data$props$pageProps$data
-    items <- props$result
-
-    if (is.null(items) || length(items) == 0) {
-      message("No items found on page ", page_num)
-      break
-    }
-
-    # Process items
-    for (i in 1:nrow(items)) {
-      item_date_str <- items$displayDate[i]
-
-      # Try parsing date with multiple formats (ISO 8601 is standard for API, but being robust)
-      item_date <- tryCatch({
-        as.Date(ymd_hms(item_date_str))
-      }, error = function(e) {
-        tryCatch(as.Date(ymd(item_date_str)), error = function(e) NA)
-      })
-
-      if (is.na(item_date)) next
-
-      if (item_date == target_date) {
-        # Valid article
-        title <- items$headline[i]
-        path <- items$path[i]
+    if (item_date == target_date) {
         link <- ifelse(grepl("^http", path), path, paste0("https://asia.nikkei.com", path))
 
         all_articles[[length(all_articles) + 1]] <- data.frame(
@@ -128,25 +150,14 @@ scrape_news_by_date <- function(target_date_str) {
           date = as.character(item_date),
           stringsAsFactors = FALSE
         )
-      } else if (item_date < target_date) {
-        # Passed the target date (assuming sorted by date DESC)
-        stop_search <- TRUE
-        # Continue to process remaining items on this page just in case sorting is slightly off?
-        # Usually search results are strictly sorted by date.
-        # But let's check a few more just in case.
-        # Actually, if we see a date older than target_date, usually we can stop page iteration.
-        # But let's be safe and check all items on *this* page, then stop.
-      }
     }
-
-    if (stop_search) break
-    page_num <- page_num + 1
-    Sys.sleep(1) # Politeness
   }
 
   if (length(all_articles) > 0) {
-    return(bind_rows(all_articles))
+    result_df <- bind_rows(all_articles)
+    return(result_df)
   } else {
+    message("No articles matched the exact date ", target_date)
     return(NULL)
   }
 }
@@ -171,6 +182,8 @@ main <- function() {
   # Clean duplicates
   news_list <- news_list %>% distinct(link, .keep_all = TRUE)
 
+  message("Found ", nrow(news_list), " articles.")
+
   # Save Headlines CSV
   csv_filename <- paste0("nikkei_news_", target_date_str, ".csv")
   write.csv(news_list, csv_filename, row.names = FALSE)
@@ -180,10 +193,18 @@ main <- function() {
   cookie <- Sys.getenv("NIKKEI_COOKIE")
 
   if (cookie == "") {
-    message("NOTE: NIKKEI_COOKIE environment variable is not set.")
+    # Try reading from cookie.txt if env var not set
+    if (file.exists("cookie.txt")) {
+        cookie <- readLines("cookie.txt", n = 1)
+        message("Loaded cookie from cookie.txt")
+    }
+  }
+
+  if (cookie == "") {
+    message("NOTE: NIKKEI_COOKIE environment variable is not set and cookie.txt not found.")
     message("Skipping full text extraction.")
   } else {
-    message("NIKKEI_COOKIE found. Starting full text extraction...")
+    message("Cookie found. Starting full text extraction...")
 
     full_articles <- list()
 
