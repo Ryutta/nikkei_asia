@@ -64,11 +64,11 @@ scrape_news_by_date <- function(target_date_str) {
   formatted_date <- format(target_date, "%Y-%m-%d")
   all_articles_df <- data.frame()
   seen_links <- c()
-
+  
   page_num <- 1
   keep_going <- TRUE
   max_pages <- 20 # Safety limit
-
+  
   # User-Agent to avoid rejection
   ua <- "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
@@ -87,16 +87,16 @@ scrape_news_by_date <- function(target_date_str) {
       if (is.null(session)) break
 
       webpage <- read_html(session)
-
+      
       script_node <- webpage %>% html_node("#__NEXT_DATA__")
       if (length(script_node) == 0) {
         message("Could not find data script tag on page ", page_num, ".")
-
+        
         # Debugging: Save the failed HTML to a file
         debug_filename <- paste0("debug_failed_", target_date_str, "_page", page_num, ".html")
         write_xml(webpage, debug_filename)
         message("Saved page content to ", debug_filename, " for inspection.")
-
+        
         break
       }
 
@@ -115,7 +115,7 @@ scrape_news_by_date <- function(target_date_str) {
         message("No more items found on page ", page_num)
         break
       }
-
+      
       # If items is a list of lists or not a dataframe, try to bind it
       if (!is.data.frame(items) && is.list(items)) {
          items <- tryCatch(bind_rows(items), error = function(e) NULL)
@@ -132,15 +132,15 @@ scrape_news_by_date <- function(target_date_str) {
       for (i in 1:nrow(items)) {
         path <- items$path[i]
         link <- ifelse(grepl("^http", path), path, paste0("https://asia.nikkei.com", path))
-
+        
         # Check duplication BEFORE processing date (optimization)
         if (link %in% seen_links) {
             next
         }
-
+        
         title <- items$name[i]
-        timestamp <- items$displayDate[i]
-
+        timestamp <- items$displayDate[i] 
+        
         # Nikkei uses JST for the date filter in URL.
         item_date_obj <- as.POSIXct(timestamp, origin="1970-01-01", tz="Asia/Tokyo")
         item_date <- as.Date(item_date_obj)
@@ -161,12 +161,12 @@ scrape_news_by_date <- function(target_date_str) {
         page_df <- bind_rows(page_articles)
         all_articles_df <- bind_rows(all_articles_df, page_df)
       }
-
+      
       if (!new_items_found) {
           message("No new items found on page ", page_num, ". Stopping pagination.")
           break
       }
-
+      
       page_num <- page_num + 1
       Sys.sleep(1) # Politeness
   }
@@ -198,7 +198,7 @@ main <- function() {
 
   # Final distinct check just in case
   news_list <- news_list %>% distinct(link, .keep_all = TRUE)
-
+  
   message("Found ", nrow(news_list), " articles.")
 
   # Save Headlines CSV
