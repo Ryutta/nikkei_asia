@@ -62,100 +62,117 @@ scrape_news_by_date <- function(target_date_str) {
   }
 
   formatted_date <- format(target_date, "%Y-%m-%d")
-  url <- paste0("https://asia.nikkei.com/latestheadlines?date=", formatted_date)
-
-  message("Fetching headlines for: ", formatted_date, " from ", url)
-
-  # Use User-Agent to avoid rejection
+  all_articles_df <- data.frame()
+  seen_links <- c()
+  
+  page_num <- 1
+  keep_going <- TRUE
+  max_pages <- 20 # Safety limit
+  
+  # User-Agent to avoid rejection
   ua <- "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
-  session <- tryCatch(
-    session(url, user_agent(ua)),
-    error = function(e) {
-      message("Failed to create session: ", e$message)
-      return(NULL)
-    }
-  )
+  while(keep_going && page_num <= max_pages) {
+      url <- paste0("https://asia.nikkei.com/latestheadlines?date=", formatted_date, "&page=", page_num)
+      message("Fetching page ", page_num, " headlines for: ", formatted_date, " from ", url)
 
-  if (is.null(session)) return(NULL)
+      session <- tryCatch(
+        session(url, user_agent(ua)),
+        error = function(e) {
+          message("Failed to create session: ", e$message)
+          return(NULL)
+        }
+      )
 
-  webpage <- read_html(session)
+      if (is.null(session)) break
 
-  script_node <- webpage %>% html_node("#__NEXT_DATA__")
-  if (length(script_node) == 0) {
-    message("Could not find data script tag.")
-    return(NULL)
-  }
+      webpage <- read_html(session)
+      
+      script_node <- webpage %>% html_node("#__NEXT_DATA__")
+      if (length(script_node) == 0) {
+        message("Could not find data script tag on page ", page_num, ".")
+        
+        # Debugging: Save the failed HTML to a file
+        debug_filename <- paste0("debug_failed_", target_date_str, "_page", page_num, ".html")
+        write_xml(webpage, debug_filename)
+        message("Saved page content to ", debug_filename, " for inspection.")
+        
+        break
+      }
 
-  json_content <- html_text(script_node)
-  data <- tryCatch(fromJSON(json_content), error = function(e) {
-    message("Failed to parse JSON: ", e$message)
-    return(NULL)
-  })
+      json_content <- html_text(script_node)
+      data <- tryCatch(fromJSON(json_content), error = function(e) {
+        message("Failed to parse JSON: ", e$message)
+        return(NULL)
+      })
 
-  if (is.null(data)) return(NULL)
+      if (is.null(data)) break
 
-  # Navigate to latestHeadlinesData items
-  # Structure seems to be data$props$pageProps$latestHeadlinesData$items
-  items <- data$props$pageProps$latestHeadlinesData$items
+      # Navigate to latestHeadlinesData items
+      items <- data$props$pageProps$latestHeadlinesData$items
 
-  if (is.null(items) || length(items) == 0) {
-    # Fallback: check other locations or try the old search method?
-    # For now, just report empty.
-    message("No items found in latestHeadlinesData for date ", formatted_date)
-    return(NULL)
-  }
-
-  # Process items
-  all_articles <- list()
-
-  # Ensure items is a data frame
-  if (!is.data.frame(items)) {
-     if (is.list(items)) {
-         # Attempt to bind if it's a list of lists
+      if (is.null(items) || length(items) == 0) {
+        message("No more items found on page ", page_num)
+        break
+      }
+      
+      # If items is a list of lists or not a dataframe, try to bind it
+      if (!is.data.frame(items) && is.list(items)) {
          items <- tryCatch(bind_rows(items), error = function(e) NULL)
-     }
-  }
+      }
 
-  if (is.null(items) || nrow(items) == 0) {
-      message("Items structure unexpected.")
-      return(NULL)
-  }
+      if (is.null(items) || nrow(items) == 0) {
+          message("Items list is empty on page ", page_num)
+          break
+      }
 
-  for (i in 1:nrow(items)) {
-    title <- items$name[i]
-    path <- items$path[i]
-    timestamp <- items$displayDate[i] # Unix timestamp
+      page_articles <- list()
+      new_items_found <- FALSE
 
-    # Convert timestamp to Date
-    # Nikkei usually uses JST/Asia time, but timestamps are UTC.
-    # We should probably convert to Date in the local context or just check if it falls on the day.
-    # The URL `date=YYYY-MM-DD` likely filters by JST day.
-    # Let's trust the server returned relevant items for that "date" query parameter.
-
-    item_date_obj <- as.POSIXct(timestamp, origin="1970-01-01", tz="Asia/Tokyo")
-    item_date <- as.Date(item_date_obj)
-
-    # Note: Sometimes an article from previous day late night might appear?
-    # Or next day early morning?
-    # We will include everything returned by this page as "relevant for this date view".
-    # But usually user wants exactly that date.
-
-    if (item_date == target_date) {
+      for (i in 1:nrow(items)) {
+        path <- items$path[i]
         link <- ifelse(grepl("^http", path), path, paste0("https://asia.nikkei.com", path))
+        
+        # Check duplication BEFORE processing date (optimization)
+        if (link %in% seen_links) {
+            next
+        }
+        
+        title <- items$name[i]
+        timestamp <- items$displayDate[i] 
+        
+        # Nikkei uses JST for the date filter in URL.
+        item_date_obj <- as.POSIXct(timestamp, origin="1970-01-01", tz="Asia/Tokyo")
+        item_date <- as.Date(item_date_obj)
 
-        all_articles[[length(all_articles) + 1]] <- data.frame(
-          title = title,
-          link = link,
-          date = as.character(item_date),
-          stringsAsFactors = FALSE
-        )
-    }
+        if (item_date == target_date) {
+            page_articles[[length(page_articles) + 1]] <- data.frame(
+              title = title,
+              link = link,
+              date = as.character(item_date),
+              stringsAsFactors = FALSE
+            )
+            seen_links <- c(seen_links, link)
+            new_items_found <- TRUE
+        }
+      }
+
+      if (length(page_articles) > 0) {
+        page_df <- bind_rows(page_articles)
+        all_articles_df <- bind_rows(all_articles_df, page_df)
+      }
+      
+      if (!new_items_found) {
+          message("No new items found on page ", page_num, ". Stopping pagination.")
+          break
+      }
+      
+      page_num <- page_num + 1
+      Sys.sleep(1) # Politeness
   }
 
-  if (length(all_articles) > 0) {
-    result_df <- bind_rows(all_articles)
-    return(result_df)
+  if (nrow(all_articles_df) > 0) {
+    return(all_articles_df)
   } else {
     message("No articles matched the exact date ", target_date)
     return(NULL)
@@ -179,9 +196,9 @@ main <- function() {
     return()
   }
 
-  # Clean duplicates
+  # Final distinct check just in case
   news_list <- news_list %>% distinct(link, .keep_all = TRUE)
-
+  
   message("Found ", nrow(news_list), " articles.")
 
   # Save Headlines CSV
