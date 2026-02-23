@@ -149,11 +149,15 @@ scrape_news_by_date <- function(target_date_str) {
           }
 
           title <- items$name[i]
-          timestamp <- items$displayDate[i]
+          timestamp <- as.numeric(items$displayDate[i])
 
+          # Manually adjust for JST (UTC + 9 hours) to avoid system timezone dependencies
           # Nikkei uses JST for the date filter in URL.
-          item_date_obj <- as.POSIXct(timestamp, origin="1970-01-01", tz="Asia/Tokyo")
-          item_date <- as.Date(item_date_obj)
+          # timestamp is Unix time (seconds since 1970-01-01 UTC).
+          # We add 9 hours (32400 seconds) to shift to JST.
+          # Then we convert to Date using UTC to extract the JST date component.
+          item_jst_time <- as.POSIXct(timestamp + (9 * 3600), origin="1970-01-01", tz="UTC")
+          item_date <- as.Date(item_jst_time)
 
           if (item_date == target_date) {
               page_articles[[length(page_articles) + 1]] <- data.frame(
