@@ -104,7 +104,9 @@ scrape_news_by_date <- function(target_date_str) {
           message("Could not find data script tag on page ", page_num, ".")
           # Debugging: Save the failed HTML to a file
           debug_filename <- paste0("debug_failed_", target_date_str, "_page", page_num, ".html")
-          write_xml(webpage, debug_filename)
+        # write_xml might not be available if xml2 is not explicitly loaded or installed differently
+        # Use base R writeLines for safer debugging
+        writeLines(as.character(webpage), debug_filename)
           message("Saved page content to ", debug_filename, " for inspection.")
           break
         }
