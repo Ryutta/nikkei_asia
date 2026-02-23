@@ -76,11 +76,11 @@ scrape_news_by_date <- function(target_date_str) {
     # Convert query_date_obj (which is numeric date from loop) back to Date
     query_date <- as.Date(query_date_obj, origin = "1970-01-01")
     formatted_date <- format(query_date, "%Y-%m-%d")
-
+    
     page_num <- 1
     keep_going <- TRUE
     max_pages <- 20 # Safety limit
-
+    
     message("Querying date: ", formatted_date, " (to capture articles for JST: ", target_date, ")")
 
     while(keep_going && page_num <= max_pages) {
@@ -98,7 +98,7 @@ scrape_news_by_date <- function(target_date_str) {
         if (is.null(session)) break
 
         webpage <- read_html(session)
-
+        
         script_node <- webpage %>% html_node("#__NEXT_DATA__")
         if (length(script_node) == 0) {
           message("Could not find data script tag on page ", page_num, ".")
@@ -142,18 +142,22 @@ scrape_news_by_date <- function(target_date_str) {
         for (i in 1:nrow(items)) {
           path <- items$path[i]
           link <- ifelse(grepl("^http", path), path, paste0("https://asia.nikkei.com", path))
-
+          
           # Check duplication BEFORE processing date (optimization)
           if (link %in% seen_links) {
               next
           }
-
+          
           title <- items$name[i]
-          timestamp <- items$displayDate[i]
-
+          timestamp <- as.numeric(items$displayDate[i])
+          
+          # Manually adjust for JST (UTC + 9 hours) to avoid system timezone dependencies
           # Nikkei uses JST for the date filter in URL.
-          item_date_obj <- as.POSIXct(timestamp, origin="1970-01-01", tz="Asia/Tokyo")
-          item_date <- as.Date(item_date_obj)
+          # timestamp is Unix time (seconds since 1970-01-01 UTC).
+          # We add 9 hours (32400 seconds) to shift to JST.
+          # Then we convert to Date using UTC to extract the JST date component.
+          item_jst_time <- as.POSIXct(timestamp + (9 * 3600), origin="1970-01-01", tz="UTC")
+          item_date <- as.Date(item_jst_time)
 
           if (item_date == target_date) {
               page_articles[[length(page_articles) + 1]] <- data.frame(
@@ -174,7 +178,7 @@ scrape_news_by_date <- function(target_date_str) {
           page_df <- bind_rows(page_articles)
           all_articles_df <- bind_rows(all_articles_df, page_df)
         }
-
+        
         # Pagination control logic:
         # If we found items OLDER than target date on this page, and NO items matching target date,
         # it strongly suggests we have passed the relevant time window (assuming reverse chronological order).
@@ -182,7 +186,7 @@ scrape_news_by_date <- function(target_date_str) {
             message("Found articles older than target date on page ", page_num, ". Stopping pagination for this query date.")
             keep_going <- FALSE
         }
-
+        
         page_num <- page_num + 1
         Sys.sleep(1) # Politeness
     }
