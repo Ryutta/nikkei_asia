@@ -20,7 +20,7 @@ get_article_content <- function(url, cookie_string) {
 
   # Use httr to fetch with cookie
   response <- tryCatch(
-    GET(url, add_headers(Cookie = cookie_string, `User-Agent` = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")),
+    GET(url, add_headers(Cookie = cookie_string, `User-Agent` = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"), timeout(60)),
     error = function(e) {
       message("Error fetching ", url, ": ", e$message)
       return(NULL)
@@ -88,7 +88,7 @@ scrape_news_by_date <- function(target_date_str) {
         message("Fetching page ", page_num, " headlines for: ", formatted_date, " from ", url)
 
         session <- tryCatch(
-          session(url, user_agent(ua)),
+        session(url, user_agent(ua), timeout(60)),
           error = function(e) {
             message("Failed to create session: ", e$message)
             return(NULL)
@@ -209,6 +209,20 @@ main <- function() {
   if (length(args) == 0) {
     message("Usage: Rscript scrape_date.R <YYYYMMDD>")
     return()
+  }
+
+  # Proxy configuration
+  proxy_url <- Sys.getenv("NIKKEI_PROXY")
+  if (proxy_url == "" && file.exists("proxy.txt")) {
+    proxy_url <- readLines("proxy.txt", n = 1)
+    message("Loaded proxy configuration from proxy.txt")
+  }
+
+  if (proxy_url != "") {
+    # Set environment variables for httr/curl to use automatically
+    Sys.setenv(http_proxy = proxy_url)
+    Sys.setenv(https_proxy = proxy_url)
+    message("Using proxy: ", proxy_url)
   }
 
   target_date_str <- args[1]
